@@ -114,12 +114,13 @@ class WindowManager {
         this.directoryDetector.updateFileSearchSettings(data.settings.fileSearch as FileSearchSettings);
       }
 
-      // Get current app and space information in parallel
-      const [currentAppResult, currentSpaceResult] = await Promise.allSettled([
+      // Get current app, space info, and Z-order previous app in parallel
+      const [currentAppResult, currentSpaceResult, previousAppResult] = await Promise.allSettled([
         getCurrentApp(),
         this.desktopSpaceManager && this.desktopSpaceManager.isReady()
           ? this.desktopSpaceManager.getCurrentSpaceInfo(null)
-          : Promise.resolve(null)
+          : Promise.resolve(null),
+        getPreviousApp()
       ]);
 
       // Process current app result
@@ -139,18 +140,15 @@ class WindowManager {
           this.nativeToolExecutor.setPreviousApp(previousApp);
           this.directoryDetector.updatePreviousApp(previousApp);
         } else {
-          // Keep the existing previousApp when Prompt Line is focused
+          // Always use Z-order result: when getCurrentApp() returns Prompt Line
+          // due to the race condition, the stored value may be stale (set before
+          // the user last switched apps). Z-order reflects the current truth.
           isPromptLineFocused = true;
-          previousApp = this.nativeToolExecutor.getPreviousApp();
-          if (!previousApp) {
-            // No stored previousApp yet (e.g. right after first launch before any
-            // other app was visited). Fall back to window-detector to find the
-            // topmost non-Prompt-Line window and use its owner as the target app.
-            previousApp = await getPreviousApp();
-            if (previousApp) {
-              this.nativeToolExecutor.setPreviousApp(previousApp);
-              this.directoryDetector.updatePreviousApp(previousApp);
-            }
+          const fresh = previousAppResult.status === 'fulfilled' ? previousAppResult.value : null;
+          previousApp = fresh ?? this.nativeToolExecutor.getPreviousApp();
+          if (previousApp) {
+            this.nativeToolExecutor.setPreviousApp(previousApp);
+            this.directoryDetector.updatePreviousApp(previousApp);
           }
           logger.debug('Prompt Line is focused, previousApp:', previousApp);
         }

@@ -90,11 +90,10 @@ class WindowDetector {
                 continue
             }
 
-            if excludedNames.contains(ownerName) { continue }
-
             if let runningApp = NSRunningApplication(processIdentifier: pid) {
-                if let bundleId = runningApp.bundleIdentifier,
-                   excludedBundleIds.contains(bundleId) {
+                if let bundleId = runningApp.bundleIdentifier {
+                    if excludedBundleIds.contains(bundleId) { continue }
+                } else if excludedNames.contains(ownerName) {
                     continue
                 }
                 var result: [String: Any] = [
