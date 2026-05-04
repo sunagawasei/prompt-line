@@ -18,6 +18,7 @@ export { SecureErrors, handleError, sanitizeCommandArgument, isCommandArgumentSa
 // Native tools
 export {
   getCurrentApp,
+  getPreviousApp,
   getActiveWindowBounds,
   pasteWithNativeTool,
   activateAndPasteWithNativeTool,

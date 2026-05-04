@@ -18,6 +18,7 @@ export {
 // App detection
 export {
   getCurrentApp,
+  getPreviousApp,
   getActiveWindowBounds,
   checkAccessibilityPermission,
 } from './app-detection';

@@ -16,6 +16,7 @@ export {
   DIRECTORY_DETECTOR_PATH,
   // App detection
   getCurrentApp,
+  getPreviousApp,
   getActiveWindowBounds,
   checkAccessibilityPermission,
   // Paste operations

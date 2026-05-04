@@ -1,6 +1,6 @@
 import { BrowserWindow } from 'electron';
 import config from '../../config/app-config';
-import { getCurrentApp, logger } from '../../utils/utils';
+import { getCurrentApp, getPreviousApp, logger } from '../../utils/utils';
 import DesktopSpaceManager from '../desktop-space-manager';
 import FileCacheManager from '../file-cache-manager';
 import type DirectoryManager from '../directory-manager';
@@ -127,6 +127,10 @@ class WindowManager {
       let isPromptLineFocused = false;
       if (currentAppResult.status === 'fulfilled') {
         const currentApp = currentAppResult.value;
+        logger.debug('showInputWindow: currentApp detected', {
+          app: currentApp,
+          isPromptLine: this.isPromptLineApp(currentApp)
+        });
 
         // Skip if the current app is Prompt Line itself
         // This prevents the issue where double-triggering the shortcut makes Prompt Line the paste target
@@ -138,7 +142,17 @@ class WindowManager {
           // Keep the existing previousApp when Prompt Line is focused
           isPromptLineFocused = true;
           previousApp = this.nativeToolExecutor.getPreviousApp();
-          logger.debug('Prompt Line is focused, keeping existing previousApp:', previousApp);
+          if (!previousApp) {
+            // No stored previousApp yet (e.g. right after first launch before any
+            // other app was visited). Fall back to window-detector to find the
+            // topmost non-Prompt-Line window and use its owner as the target app.
+            previousApp = await getPreviousApp();
+            if (previousApp) {
+              this.nativeToolExecutor.setPreviousApp(previousApp);
+              this.directoryDetector.updatePreviousApp(previousApp);
+            }
+          }
+          logger.debug('Prompt Line is focused, previousApp:', previousApp);
         }
       } else {
         logger.error('Failed to get current app:', currentAppResult.reason);

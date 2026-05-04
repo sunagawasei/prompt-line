@@ -170,6 +170,47 @@ export function checkAccessibilityPermission(): Promise<AccessibilityStatus> {
   });
 }
 
+export function getPreviousApp(): Promise<AppInfo | null> {
+  return new Promise((resolve) => {
+    if (process.platform !== 'darwin') {
+      resolve(null);
+      return;
+    }
+
+    const options = {
+      timeout: TIMEOUTS.CURRENT_APP_TIMEOUT,
+      killSignal: 'SIGTERM' as const
+    };
+
+    execFile(WINDOW_DETECTOR_PATH, ['previous-app'], options, (error, stdout) => {
+      if (error) {
+        logger.warn('Error getting previous app (non-blocking):', error.message);
+        resolve(null);
+      } else {
+        try {
+          const result = JSON.parse(stdout.trim());
+
+          if (result.error) {
+            logger.warn('Native tool returned error for previous app:', result.error);
+            resolve(null);
+            return;
+          }
+
+          const appInfo: AppInfo = {
+            name: result.name,
+            bundleId: result.bundleId === null ? null : result.bundleId
+          };
+
+          resolve(appInfo);
+        } catch (parseError) {
+          logger.warn('Error parsing previous app info:', parseError);
+          resolve(null);
+        }
+      }
+    });
+  });
+}
+
 /**
  * Check if the given AppInfo or app name string represents iTerm2
  */
