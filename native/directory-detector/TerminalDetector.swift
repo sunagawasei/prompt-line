@@ -294,18 +294,20 @@ extension DirectoryDetector {
     /// background panes/tabs keep redrawing prompts (starship, themes), so
     /// the focused pane often has neither the newest mtime nor a clear lead.
     /// Falls back to the generic process-tree detector if the CLI fails.
-    static func getWezTermDirectory(appPid: pid_t) -> (directory: String?, shellPid: pid_t?, usedCli: Bool) {
+    static func getWezTermDirectory(appPid: pid_t) -> (directory: String?, shellPid: pid_t?, usedCli: Bool, tty: String?) {
         if let result = getWezTermDirectoryViaCli() {
-            return (result.directory, result.shellPid, true)
+            return (result.directory, result.shellPid, true, result.tty)
         }
         let fallback = getNativeTerminalDirectory(appPid: appPid)
-        return (fallback.directory, fallback.shellPid, false)
+        // Process-tree tty is chosen by mtime and isn't guaranteed to match the
+        // focused pane, so never surface it — only the CLI path's tty is trustworthy.
+        return (fallback.directory, fallback.shellPid, false, nil)
     }
 
     /// Ask the running WezTerm GUI which pane is focused via `wezterm cli`.
     /// Returns nil if the CLI is unavailable, the daemon is not reachable,
     /// or the JSON shape is unexpected — callers should fall back.
-    private static func getWezTermDirectoryViaCli() -> (directory: String, shellPid: pid_t?)? {
+    private static func getWezTermDirectoryViaCli() -> (directory: String, shellPid: pid_t?, tty: String?)? {
         guard let focusedPaneId = runWezTermCli(args: ["cli", "list-clients", "--format", "json"])
             .flatMap({ parseFirstFocusedPaneId(from: $0) }) else {
             return nil
@@ -319,11 +321,10 @@ extension DirectoryDetector {
             return nil
         }
 
-        let shellPid: pid_t? = (pane["tty_name"] as? String).flatMap { tty in
-            getShellPidFromTty(tty)
-        }
+        let ttyName = pane["tty_name"] as? String
+        let shellPid: pid_t? = ttyName.flatMap { getShellPidFromTty($0) }
 
-        return (directory, shellPid)
+        return (directory, shellPid, ttyName)
     }
 
     /// Locate the WezTerm CLI. Prefer the binary the user already has on

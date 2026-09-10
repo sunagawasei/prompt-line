@@ -21,7 +21,7 @@ export interface DirectoryInfo {
   tty?: string;
   pid?: number;
   idePid?: number;
-  method?: 'tty' | 'window-title' | 'ide-shell-fast' | 'electron-pty';
+  method?: 'tty' | 'window-title' | 'ide-shell-fast' | 'electron-pty' | 'wezterm-cli' | 'wezterm-process' | 'herdr-api';
   appName?: string;
   bundleId?: string;
   error?: string;

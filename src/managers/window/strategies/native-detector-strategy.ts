@@ -2,6 +2,7 @@ import { execFile } from 'child_process';
 import config from '../../../config/app-config';
 import { logger, DIRECTORY_DETECTOR_PATH } from '../../../utils/utils';
 import { listDirectory } from '../../../utils/file-search';
+import { resolveHerdrApiSocket, getHerdrFocusedPaneCwd } from '../../../utils/herdr-client';
 import type { DirectoryInfo, FileSearchSettings, AppInfo } from '../../../types';
 import type { IDirectoryDetectionStrategy } from './types';
 import { TIMEOUTS } from '../../../constants';
@@ -60,6 +61,29 @@ export class NativeDetectorStrategy implements IDirectoryDetectionStrategy {
           if (!detectResult.directory) {
             resolve(null);
             return;
+          }
+
+          // Step 1.5: WezTerm reports the cwd of whatever runs in its pane, which
+          // for a herdr (terminal multiplexer) pane is herdr itself — not the pane
+          // herdr has focused. Ask herdr directly when it owns the foreground.
+          if (detectResult.method === 'wezterm-cli' && detectResult.tty) {
+            let herdrCwd: string | null = null;
+            try {
+              const socketPath = await resolveHerdrApiSocket(detectResult.tty, TIMEOUTS.HERDR_RESOLVE);
+              if (socketPath) {
+                herdrCwd = await getHerdrFocusedPaneCwd(socketPath, TIMEOUTS.HERDR_API);
+              }
+            } catch (herdrError) {
+              logger.debug('herdr directory resolution threw; keeping detected directory:', herdrError);
+            }
+
+            if (herdrCwd) {
+              logger.debug('Replaced detected directory with herdr focused pane cwd');
+              detectResult.directory = herdrCwd;
+              detectResult.method = 'herdr-api';
+            } else {
+              logger.debug('herdr directory not available; keeping detected directory');
+            }
           }
 
           // Step 2: List files using Node.js file-search module

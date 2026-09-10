@@ -21,7 +21,10 @@ export const TIMEOUTS = {
   TEXT_FIELD_DETECTION: 3000,
   SYMBOL_SEARCH: 5000,
   SHORT_OPERATION: 1000,
-  DESKTOP_SPACE_DETECTION: 5000
+  DESKTOP_SPACE_DETECTION: 5000,
+  // herdr focused-pane cwd resolution (provisional; to be tuned from measurements)
+  HERDR_RESOLVE: 1500,
+  HERDR_API: 1000
 } as const;
 
 // Delay constants for various operations

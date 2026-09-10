@@ -196,6 +196,7 @@ class DirectoryDetector {
             let directory: String?
             let shellPid: pid_t?
             let methodName: String
+            var wezTermTty: String?
 
             if isWezTerm(bundleId) {
                 // WezTerm exposes a CLI that reports the focused pane directly,
@@ -205,6 +206,7 @@ class DirectoryDetector {
                 directory = result.directory
                 shellPid = result.shellPid
                 methodName = result.usedCli ? "wezterm-cli" : "wezterm-process"
+                wezTermTty = result.tty
             } else if isGhostty(bundleId) {
                 // Ghostty's AXWindow.AXDocument carries the focused pane's CWD,
                 // which updates instantly on pane focus changes. tty mtime is
@@ -235,6 +237,10 @@ class DirectoryDetector {
 
                 if let pid = shellPid {
                     result["pid"] = pid
+                }
+
+                if let tty = wezTermTty {
+                    result["tty"] = tty
                 }
 
                 return result
