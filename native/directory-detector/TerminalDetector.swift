@@ -307,13 +307,43 @@ extension DirectoryDetector {
     /// Ask the running WezTerm GUI which pane is focused via `wezterm cli`.
     /// Returns nil if the CLI is unavailable, the daemon is not reachable,
     /// or the JSON shape is unexpected — callers should fall back.
+    ///
+    /// Resolving a socket doesn't guarantee `wezterm cli` avoids spawning a
+    /// mux server: if connecting to that socket still fails, `wezterm cli`
+    /// can try to daemonize one anyway, and a failing environment hits this
+    /// on every detection call — deadline recovery in `runWezTermCli` bounds
+    /// our own wait, not what the daemonized process does afterward.
     private static func getWezTermDirectoryViaCli() -> (directory: String, shellPid: pid_t?, tty: String?)? {
-        guard let focusedPaneId = runWezTermCli(args: ["cli", "list-clients", "--format", "json"])
-            .flatMap({ parseFirstFocusedPaneId(from: $0) }) else {
+        // Single monotonic deadline shared by socket resolution and both CLI
+        // calls: it bounds every blocking wait (poll for output, process
+        // exit) below, but synchronous work in between — JSON parsing,
+        // spawning `Process`, filesystem/libproc calls — isn't itself cut
+        // short by it, so overrun is small in practice but not a hard cap.
+        // Monotonic (not wall-clock) so a clock step doesn't shrink or
+        // stretch the 1s budget.
+        let deadline = DispatchTime.now() + 1.0
+
+        // If we can't identify the GUI's socket, don't run the CLI at all:
+        // launching `Process` without WEZTERM_UNIX_SOCKET inherits the
+        // parent's environment, so a stray inherited socket would silently
+        // target the wrong GUI.
+        guard let socketPath = wezTermGuiSocketPath(deadline: deadline) else {
             return nil
         }
 
-        guard let paneListData = runWezTermCli(args: ["cli", "list", "--format", "json"]),
+        guard let focusedPaneId = runWezTermCli(
+            args: ["cli", "list-clients", "--format", "json"],
+            deadline: deadline,
+            socketPath: socketPath
+        ).flatMap({ parseFirstFocusedPaneId(from: $0) }) else {
+            return nil
+        }
+
+        guard let paneListData = runWezTermCli(
+                args: ["cli", "list", "--format", "json"],
+                deadline: deadline,
+                socketPath: socketPath
+              ),
               let panes = (try? JSONSerialization.jsonObject(with: paneListData)) as? [[String: Any]],
               let pane = panes.first(where: { ($0["pane_id"] as? Int) == focusedPaneId }),
               let cwdString = pane["cwd"] as? String,
@@ -321,10 +351,112 @@ extension DirectoryDetector {
             return nil
         }
 
+        // shellPid is left nil on this path: nothing reads it (TS resolves the
+        // focused pid itself from `tty`), and getShellPidFromTty's unbounded
+        // `ps` wait would reintroduce the deadline-less hang this function
+        // exists to avoid.
         let ttyName = pane["tty_name"] as? String
-        let shellPid: pid_t? = ttyName.flatMap { getShellPidFromTty($0) }
+        return (directory, nil, ttyName)
+    }
 
-        return (directory, shellPid, ttyName)
+    /// Resolve the running WezTerm GUI's unix socket. Identity starts from
+    /// the process, not the filesystem: `gui-sock-*` files accumulate across
+    /// restarts (stale files from old runs are common), so counting files
+    /// can't establish uniqueness — counting live `wezterm-gui` processes can.
+    /// Doesn't read `~/.local/share/wezterm/pid` — that file can name a
+    /// wezterm-mux-server pid instead of the GUI's, pointing at a socket
+    /// that doesn't exist.
+    static func wezTermGuiSocketPath(deadline: DispatchTime) -> String? {
+        guard let guiPids = liveWezTermGuiPids(deadline: deadline),
+              guiPids.count == 1,
+              let guiPid = guiPids.first else {
+            return nil
+        }
+
+        var searchDirs: [String] = []
+        if let xdgRuntimeDir = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"], !xdgRuntimeDir.isEmpty {
+            searchDirs.append("\(xdgRuntimeDir)/wezterm")
+        }
+        // Read HOME from the environment rather than NSHomeDirectory(): the
+        // latter can keep reporting the login directory after HOME has been
+        // overridden, which is what wezterm itself honors when placing sockets.
+        let homeDir = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
+        let fallbackDir = "\(homeDir)/.local/share/wezterm"
+        if !searchDirs.contains(fallbackDir) {
+            searchDirs.append(fallbackDir)
+        }
+
+        // Only the one live GUI's own socket file counts as a match. Both
+        // dirs can hold a same-named file (e.g. a stale one left behind by
+        // an earlier XDG_RUNTIME_DIR), so "first one found" wouldn't be a
+        // unique answer — require exactly one to actually exist.
+        let fileManager = FileManager.default
+        var matches: [String] = []
+        for dir in searchDirs {
+            guard DispatchTime.now() < deadline else { return nil }
+            let candidate = "\(dir)/gui-sock-\(guiPid)"
+            if fileManager.fileExists(atPath: candidate) {
+                matches.append(candidate)
+            }
+        }
+
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    /// Full executable path for a live pid via libproc, or nil if the pid is
+    /// gone or unreadable.
+    private static func executablePath(forPid pid: pid_t) -> String? {
+        // PROC_PIDPATHINFO_MAXSIZE (4*MAXPATHLEN) isn't bridgeable to Swift; inline it.
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    /// Enumerate all live wezterm-gui pids via libproc (no subprocess).
+    /// Returns nil — distinct from an empty result — if the pid list might
+    /// be truncated or the deadline ran out before that could be ruled out;
+    /// a possibly-truncated list must never be treated as "all of them".
+    private static func liveWezTermGuiPids(deadline: DispatchTime) -> [pid_t]? {
+        guard DispatchTime.now() < deadline else { return nil }
+        let pidSize = MemoryLayout<pid_t>.size
+
+        let sizeQuery = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
+        guard sizeQuery > 0 else { return nil }
+        // The size query is already an overestimate, but processes can start
+        // between this call and the fetch below, so pad further still.
+        var bufferByteCount = Int(sizeQuery) + 256 * pidSize
+
+        var rawPids: [pid_t]?
+        for _ in 0..<5 {
+            guard DispatchTime.now() < deadline else { return nil }
+
+            var buffer = [pid_t](repeating: 0, count: bufferByteCount / pidSize)
+            let filled = buffer.withUnsafeMutableBytes { ptr in
+                proc_listpids(UInt32(PROC_ALL_PIDS), 0, ptr.baseAddress, Int32(ptr.count))
+            }
+            guard filled > 0 else { return nil }
+
+            if Int(filled) >= bufferByteCount {
+                // The buffer came back exactly full, so it may have been
+                // truncated — grow and retry rather than trust a partial list.
+                bufferByteCount *= 2
+                continue
+            }
+
+            rawPids = Array(buffer.prefix(Int(filled) / pidSize))
+            break
+        }
+        guard let pids = rawPids else { return nil }
+
+        var guiPids: [pid_t] = []
+        for pid in pids where pid != 0 {
+            guard DispatchTime.now() < deadline else { return nil }
+            guard let path = executablePath(forPid: pid),
+                  (path as NSString).lastPathComponent == "wezterm-gui" else { continue }
+            guiPids.append(pid)
+        }
+        return guiPids
     }
 
     /// Locate the WezTerm CLI. Prefer the binary the user already has on
@@ -340,12 +472,29 @@ extension DirectoryDetector {
         return candidates.first { fileManager.isExecutableFile(atPath: $0) }
     }
 
-    private static func runWezTermCli(args: [String]) -> Data? {
+    /// Run a `wezterm cli` subcommand. The blocking waits — polling for
+    /// output and waiting for the child to exit, including SIGTERM/SIGKILL
+    /// recovery on timeout — are all bounded by `deadline` and leave no
+    /// reader thread behind (reading happens inline via `poll`, not on a
+    /// second thread). `process.run()` and parsing the result aren't
+    /// themselves cut short by the deadline. Output is capped at
+    /// `wezTermCliMaxOutputBytes`; a child stuck past the deadline is
+    /// SIGKILL'd but not waited on further, so it isn't guaranteed to be
+    /// reaped before this function returns.
+    private static func runWezTermCli(args: [String], deadline: DispatchTime, socketPath: String?) -> Data? {
+        guard DispatchTime.now() < deadline else { return nil }
         guard let cliPath = wezTermCliPath() else { return nil }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cliPath)
         process.arguments = args
+        if let socketPath = socketPath {
+            // Copy the inherited environment rather than replacing it —
+            // replacing drops PATH and everything else the child needs.
+            var env = ProcessInfo.processInfo.environment
+            env["WEZTERM_UNIX_SOCKET"] = socketPath
+            process.environment = env
+        }
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -353,13 +502,98 @@ extension DirectoryDetector {
 
         do {
             try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-            return data
         } catch {
             return nil
         }
+
+        let exitSemaphore = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exitSemaphore.signal() }
+
+        let readHandle = pipe.fileHandleForReading
+        let fd = readHandle.fileDescriptor
+        defer { try? readHandle.close() }
+
+        let currentFlags = fcntl(fd, F_GETFL, 0)
+        guard currentFlags != -1, fcntl(fd, F_SETFL, currentFlags | O_NONBLOCK) != -1 else {
+            // Fail closed: if we can't confirm O_NONBLOCK took effect, don't
+            // read at all — a blocking read here could hang past `deadline`
+            // undetected.
+            terminateWezTermCli(process, exitSemaphore: exitSemaphore, deadline: deadline)
+            return nil
+        }
+
+        let collected = readWezTermCliOutput(fd: fd, deadline: deadline)
+        guard let collected else {
+            terminateWezTermCli(process, exitSemaphore: exitSemaphore, deadline: deadline)
+            return nil
+        }
+
+        if exitSemaphore.wait(timeout: deadline) == .timedOut {
+            terminateWezTermCli(process, exitSemaphore: exitSemaphore, deadline: deadline)
+            return nil
+        }
+        guard process.terminationStatus == 0 else { return nil }
+        return collected
+    }
+
+    /// Upper bound on a single `wezterm cli` invocation's stdout: keeps this
+    /// call's memory bounded regardless of what the child writes.
+    private static let wezTermCliMaxOutputBytes = 4 * 1024 * 1024
+
+    /// Drain `fd` (already `O_NONBLOCK`) via `poll`, bounded by `deadline`.
+    /// Returns nil on timeout, a read error, or exceeding
+    /// `wezTermCliMaxOutputBytes` — all cases the caller should treat as "no
+    /// usable output", not partial data.
+    private static func readWezTermCliOutput(fd: Int32, deadline: DispatchTime) -> Data? {
+        var collected = Data()
+        while true {
+            let timeoutMs = millisecondsUntilDeadline(deadline)
+            guard timeoutMs > 0 else { return nil }
+
+            var fds = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let pollResult = poll(&fds, 1, timeoutMs)
+            if pollResult < 0 {
+                if errno == EINTR { continue }
+                return nil
+            }
+            guard pollResult > 0 else { return nil } // no data before deadline
+
+            var chunk = [UInt8](repeating: 0, count: 64 * 1024)
+            let bytesRead = chunk.withUnsafeMutableBytes { buffer in
+                read(fd, buffer.baseAddress, buffer.count)
+            }
+            if bytesRead > 0 {
+                collected.append(contentsOf: chunk[0..<bytesRead])
+                guard collected.count <= wezTermCliMaxOutputBytes else { return nil }
+            } else if bytesRead == 0 {
+                return collected // EOF
+            } else if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR {
+                continue
+            } else {
+                return nil
+            }
+        }
+    }
+
+    /// Escalate SIGTERM → SIGKILL for a still-running child, each wait bounded
+    /// by `deadline`. Fire-and-forget past the deadline: doesn't block this
+    /// call any further to confirm the kill was fully reaped.
+    private static func terminateWezTermCli(_ process: Process, exitSemaphore: DispatchSemaphore, deadline: DispatchTime) {
+        guard process.isRunning else { return }
+        process.terminate()
+        if exitSemaphore.wait(timeout: deadline) == .timedOut, process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+            _ = exitSemaphore.wait(timeout: deadline)
+        }
+    }
+
+    /// Milliseconds remaining until `deadline`, clamped to `[0, Int32.max]`
+    /// for use as a `poll()` timeout.
+    private static func millisecondsUntilDeadline(_ deadline: DispatchTime) -> Int32 {
+        let now = DispatchTime.now()
+        guard deadline > now else { return 0 }
+        let nanoseconds = deadline.uptimeNanoseconds - now.uptimeNanoseconds
+        return Int32(min(nanoseconds / 1_000_000, UInt64(Int32.max)))
     }
 
     private static func parseFirstFocusedPaneId(from data: Data) -> Int? {
