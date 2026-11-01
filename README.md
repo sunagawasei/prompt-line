@@ -1,187 +1,55 @@
-# 🧑‍💻 Prompt Line
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/nkmr-jp/prompt-line)
+# Prompt Line
 
-<!-- Keep these links. Translations will automatically update with the README. -->
-English |
-[日本語](README_ja.md)
+ホットキーで開く入力パネルに文章を書き、Cmd+Enter で直前に使っていたアプリへ貼り付ける macOS 常駐アプリ。
+日本語入力を前提に、Swift のネイティブ単一プロセスで作っている(macOS 14 以上)。
 
-## Overview
+[nkmr-jp/prompt-line](https://github.com/nkmr-jp/prompt-line)(Electron 版)の fork で、個人用に Swift で書き直した。
+上流とは独立して作っており、上流への変更提案は出さない。ライセンスは上流と同じ([LICENSE](LICENSE))。
 
-Prompt Line is a macOS app developed to improve the prompt input experience in the terminal for CLI-based AI coding agents such as [Claude Code](https://github.com/anthropics/claude-code), [Codex CLI](https://github.com/openai/codex), and [Gemini CLI](https://github.com/google-gemini/gemini-cli).
-It provides a comfortable input experience through a floating window.
+## 操作
 
-Key capabilities:
+| キー | 動作 |
+|---|---|
+| Cmd+Shift+Space / Cmd+Shift+P | パネルを開く・閉じる |
+| Cmd+Enter | 貼り付け先のアプリへ貼り付けて閉じる |
+| Esc | 閉じる(下書きは残る) |
+| Ctrl+j / Ctrl+k | 履歴を古い方・新しい方へ送る |
+| Cmd+f | 履歴を検索する(スペース区切りで絞り込み。Enter で確定、Esc で取消) |
 
-1. **Quick input, quick paste** — Floating window with `Cmd+Shift+Space`, paste anywhere with `Cmd+Enter`
-2. **Context search** — Search agent skills, files, symbols, and more with `/` and `@`, with prompt history reuse
-3. **Extensible via plugins** — Add custom search and skills with simple YAML files ([Plugin Guide](docs/en/plugins.md))
+下書きは自動で保存され、貼り付けたときだけ消える。履歴は直近 5,000 件を検索・送りの対象にする。
 
-
-## Features
-
-### Quick Launch, Quick Paste
-Quick launch with shortcut (`Cmd+Shift+Space`).<br>
-Type text and quick paste (`Cmd+Enter`).
-![doc1.gif](assets/doc1.gif)
-
-### Perfect for Editing Voice-Inputted Text
-The operation is the same as a typical text editor. <br>
-Of course, you can also use it in combination with a voice input app. <br>
-Pressing Enter will not automatically send the text, so you don't have to worry about line breaks. <br>
-It is also ideal for editing text entered by voice. <br>
-(This video uses [superwhisper](https://superwhisper.com/).)
-![doc2.gif](assets/doc2.gif)
-
-### Search and Reuse Prompt History
-Prompt history is saved and can be reused from the right menu. <br>
-Search is also available. (`Cmd+f`)
-![doc3.gif](assets/doc3.gif)
-
-### Launch Anywhere
-Can be launched anywhere there's a text input field. <br>
-Also convenient when you want to reuse the same prompt in other apps.
-![doc4.gif](assets/doc4.gif)
-
-Of course, it also works with apps other than Terminal.
-![doc5.gif](assets/doc5.gif)
-
-### Context Search and Autocomplete
-
-Type `/` or `@` to search and autocomplete contexts such as agent skills, built-in commands, files, and symbols.<br>
-These can be extended with plugins. See: [Plugin Guide](docs/en/plugins.md) | [prompt-line-plugins](https://github.com/nkmr-jp/prompt-line-plugins)
-<table>
-<tr>
-<td>Agent Skills and Built-in Commands <img src="assets/doc9.png"> </td>
-<td>File and Directory Search <img src="assets/doc10.png"> </td>
-</tr>
-<tr>
-<td>Symbol Search<img src="assets/doc11.png"> </td>
-<td>Custom Search (@agent:, @plan:, @team:, etc.) <img src="assets/doc14.png"> </td>
-</tr>
-</table>
-
-## 📦 Installation
-
-### System Requirements
-
-- macOS 10.14 or later
-- Node.js 20 or later
-- [pnpm](https://pnpm.io/installation)
-- Xcode Command Line Tools or Xcode (for compiling native tools)
-- [fd](https://github.com/sharkdp/fd) and [rg (ripgrep)](https://github.com/BurntSushi/ripgrep) (for file search and symbol search features)
-
-### Prompt Line Installation
+## ビルドと実行
 
 ```bash
-git clone https://github.com/nkmr-jp/prompt-line.git
-cd prompt-line
-git checkout v0.x.x  # Optional: replace with desired version tag
-pnpm install
-pnpm run install-app    # Build and install to /Applications (includes code signing setup)
+swift test                    # コアのテスト
+./scripts/build-app.sh        # build/PromptLine.app を作る
+open build/PromptLine.app
 ```
 
-Launch Prompt Line. An icon will appear in the system tray.
+貼り付けのキー送信にアクセシビリティの許可が要る。`build-app.sh` は、キーチェーンに "Prompt Line" という名前のコード署名証明書があればそれで署名する。
+同じ証明書で署名し続けると、作り直しても許可が残る。無ければアドホック署名になり、作り直すたびに許可し直す。
 
-<div><img src="assets/doc6.png" width="200"></div>
+起動時の引数(テスト用): `--hotkey ctrl+opt+p,...` でホットキーを差し替え、`--data-dir <dir>` でデータの置き場を差し替える。
 
-You can start using it with `Cmd+Shift+Space`.
+## データ
 
-### Accessibility Permissions
+`~/.prompt-line/` に置く。
 
-Prompt Line requires accessibility permissions to paste text into other applications.
-A dialog box will appear on first use, so follow the instructions to set it up.
+- `history.jsonl`: 履歴。1 行 1 件の JSON で、追記だけを行う(Electron 版と同じ形式)。
+- `draft-swift.json`: 下書き。
 
-<div><img src="assets/doc7.png" width="200"></div>
+どちらも所有者だけが読める権限(0600)で作る。
 
+## 計測とテスト
 
-### Troubleshooting
-
-#### If the accessibility permissions dialog box does not appear
-
-1. Open **System Settings** → **Privacy and Security** → **Accessibility**.
-2. Find “Prompt Line” in the list and enable it.
-3. If it is not in the list, add Prompt Line from Applications using the “+” button.
-
-#### If “Prompt Line” is enabled in Accessibility Permissions but you still cannot paste
-
-1. Open **System Settings** → **Privacy and Security** → **Accessibility**
-2. Delete “Prompt Line” from Applications using the “-” button to reset permissions
-3. The issue should be resolved after reconfiguring settings.
-
-Accessibility permissions can also be reset using the following command:
-```bash
-pnpm run reset-accessibility
-```
-
-## 📦 Update
-
-If you already have an older version installed and want to update to the latest version:
+`Sources/bench` は、表示時間・メモリ・貼り付けまでの動作を実機で測る補助ツール(アプリには含まれない)。使い方と結果は [docs/baseline.md](docs/baseline.md)、既知の制約は [docs/known-issues.md](docs/known-issues.md)。
 
 ```bash
-git pull
-pnpm install
-pnpm run install-app
-pnpm run migrate-settings        # Migrate settings to latest defaults (auto-backup)
+swift build -c release --product bench
+.build/release/bench e2e --app "$PWD/build/PromptLine.app"          # 貼り付け・履歴の追記
+.build/release/bench e2e-draft --app "$PWD/build/PromptLine.app"    # 下書き
+.build/release/bench e2e-history --app "$PWD/build/PromptLine.app"  # 履歴送り
+.build/release/bench e2e-search --app "$PWD/build/PromptLine.app"   # 検索
 ```
 
-## Usage
-
-### Basic Workflow
-1. Move to where you want to input
-2. Press `Cmd+Shift+Space` to open Prompt Line
-3. Type your text
-4. Press `Cmd+Enter` to paste text
-5. Continue working
-
-### Features
-
-- **History Panel** - Click previous entries to reuse. Search is also available. (`Cmd+f`)
-- **Draft Autosave** - Automatically saves your work
-- **Image Support** - Paste clipboard images with `Cmd+V`
-- **File Opener** - Open files from file path text (`Ctrl+Enter` or `Cmd+Click`)
-- **File Search** - Search files by typing `@`
-- **Symbol Search** - Search code symbols by typing `@<lang>:<query>` (e.g., `@ts:Config`)
-- **Custom Search** - Search agents, plans, teams, history, etc. by typing `@prefix:` (extensible with [plugins](docs/en/plugins.md))
-
-## ⚙️ Settings
-
-Settings file: `~/.prompt-line/settings.yaml` (hot-reloaded, no restart needed)
-
-See: [Settings Reference](docs/en/settings.md) | [settings.example.yaml](settings.example.yaml) | [Migration Guide](docs/en/migration.md)
-
-## 🔌 Plugins
-
-Plugins are YAML files that add agent skills (`/`), custom search (`@prefix:`), and built-in commands/skills/agents for CLI tools.
-
-**Quickest way:** Place a YAML file in `~/.prompt-line/agent-skills/`, `~/.prompt-line/custom-search/`, or `~/.prompt-line/agent-built-in/` — no GitHub repo needed.
-
-**Share via GitHub:** Install plugins from repositories:
-
-```bash
-# Global CLI setup (run once in the prompt-line project directory)
-pnpm link
-
-# Install plugins
-prompt-line-plugin install github.com/nkmr-jp/prompt-line-plugins
-prompt-line-plugin install github.com/user/repo@branch   # specific version
-```
-
-**Details:** [docs/en/plugins.md](docs/en/plugins.md)<br>
-**Example repo:** [prompt-line-plugins](https://github.com/nkmr-jp/prompt-line-plugins)
-
-## Prompt History
-
-- All data stored locally on your Mac
-- No internet connection required
-- Prompt history saved in `~/.prompt-line/history.jsonl`
-- Saved in JSON Lines format, so you can analyze it using [DuckDB](https://duckdb.org/)
-
-![doc8.png](assets/doc8.png)
-
-## Contributing
-
-See [Contribution Guide](CONTRIBUTING.md) for details.
-
-## License
-
-MIT License - see [LICENSE](./LICENSE) for details.
+専用のデータ置き場とホットキー(Ctrl+Opt+P)で自前のインスタンスを起動するので、使っているアプリには触れない。
