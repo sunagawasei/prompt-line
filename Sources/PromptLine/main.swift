@@ -96,6 +96,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshHistoryList()
         panel.centerOnActiveScreen()
         panel.makeKeyAndOrderFront(nil)
+        // 前面アプリが貼り付け先のままだと、Raycast のクリップボード履歴などが入力欄でなくそのアプリへ貼る
+        NSApp.activate(ignoringOtherApps: true)
         panel.makeFirstResponder(panel.textView)
     }
 
@@ -107,6 +109,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshHistoryList()
         panel.orderOut(nil)
         flushDraft()
+        // 自分が前面のまま閉じると、キー入力の行き先が無くなる
+        if let target, !target.isTerminated { target.activate() }
     }
 
     private func navigateHistory(older: Bool) {
