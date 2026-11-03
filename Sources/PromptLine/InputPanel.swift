@@ -16,6 +16,33 @@ final class InputTextView: NSTextView {
     var onHistoryOlder: (() -> Void)?
     var onHistoryNewer: (() -> Void)?
     var onSearch: (() -> Void)?
+    /// 文字数の表示とプレースホルダの更新用。string への代入でも呼ぶ(代入では NSText.didChangeNotification は出ない)
+    var onContentChange: (() -> Void)?
+
+    override var string: String {
+        didSet { contentChanged() }
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        contentChanged()
+    }
+
+    private func contentChanged() {
+        needsDisplay = true
+        onContentChange?()
+    }
+
+    /// 空のときだけ薄い案内を、文字が置かれる位置に描く。変換中は未確定文字があるので描かない
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !hasMarkedText() else { return }
+        let origin = textContainerOrigin
+        let padding = textContainer?.lineFragmentPadding ?? 0
+        NSAttributedString(string: "プロンプトを入力…", attributes: [
+            .font: font ?? NSFont.systemFont(ofSize: 15), .foregroundColor: Theme.dimText.withAlphaComponent(0.6),
+        ]).draw(at: NSPoint(x: origin.x + padding, y: origin.y))
+    }
 
     override func keyDown(with event: NSEvent) {
         if hasMarkedText() { return super.keyDown(with: event) }
@@ -57,60 +84,135 @@ final class InputTextView: NSTextView {
     }
 }
 
+/// 履歴の 1 行。文章を左に、入力した時刻を右端に出す。選択中は角丸の背景と左のアクセント線で強調する
+final class HistoryRowView: NSView {
+    static let height: CGFloat = 24
+    /// 文章の左端を入力欄(textContainerInset 20 + lineFragmentPadding 5)に揃えるための、行の左余白。
+    /// 一覧の左右余白 6 を引いてある
+    static let textInset: CGFloat = 19
+
+    private let title = NSTextField(labelWithString: "")
+    private let age = NSTextField(labelWithString: "")
+    private let accentBar = NSView()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        accentBar.wantsLayer = true
+        accentBar.layer?.backgroundColor = Theme.accent.cgColor
+        accentBar.layer?.cornerRadius = 1.25
+        accentBar.isHidden = true
+        title.lineBreakMode = .byTruncatingTail
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        age.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        age.textColor = Theme.dimText.withAlphaComponent(0.7)
+        age.setContentHuggingPriority(.required, for: .horizontal)
+        age.setContentCompressionResistancePriority(.required, for: .horizontal)
+        for view in [accentBar, title, age] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: Self.height),
+            accentBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
+            accentBar.widthAnchor.constraint(equalToConstant: 2.5),
+            accentBar.topAnchor.constraint(equalTo: topAnchor, constant: 5),
+            accentBar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
+            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.textInset),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor),
+            age.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 10),
+            age.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            age.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+
+    func show(title text: NSAttributedString, age ageText: String, isSelected: Bool) {
+        title.attributedStringValue = text
+        age.stringValue = ageText
+        layer?.backgroundColor = isSelected ? Theme.selectedRow.cgColor : NSColor.clear.cgColor
+        accentBar.isHidden = !isSelected
+        age.textColor = Theme.dimText.withAlphaComponent(isSelected ? 0.9 : 0.7)
+    }
+}
+
 /// 入力欄の下に出す履歴(新しい順)。履歴を送っている間は選択中の行を強調し、その前後を見せる
 final class HistoryListView: NSView, NSTextFieldDelegate {
     static let rows = 6
-    static let rowHeight: CGFloat = 22
-    static var height: CGFloat { CGFloat(rows) * rowHeight + 8 }
+    static let headerHeight: CGFloat = 22
+    static let padding: CGFloat = 6
+    static var height: CGFloat { headerHeight + CGFloat(rows) * HistoryRowView.height + padding * 2 }
 
-    private let labels: [NSTextField]
+    private let rowViews: [HistoryRowView]
+    private let headerTitle = NSTextField(labelWithString: "履歴")
+    private let headerCount = NSTextField(labelWithString: "")
     /// 検索中だけ、先頭の行に重ねて出す
     let searchField = NSTextField()
+    private let searchIcon = NSImageView()
     var onQueryChange: ((String) -> Void)?
     var isSearching = false {
         didSet {
             searchField.isHidden = !isSearching
-            labels[0].isHidden = isSearching
+            searchIcon.isHidden = !isSearching
+            rowViews[0].isHidden = isSearching
+            headerTitle.stringValue = isSearching ? "検索結果" : "履歴"
         }
     }
 
     override init(frame: NSRect) {
-        labels = (0..<Self.rows).map { _ in
-            let label = NSTextField(labelWithString: "")
-            label.font = .systemFont(ofSize: 13)
-            label.lineBreakMode = .byTruncatingTail
-            label.drawsBackground = true
-            label.backgroundColor = .clear
-            label.heightAnchor.constraint(equalToConstant: HistoryListView.rowHeight).isActive = true
-            return label
-        }
+        rowViews = (0..<Self.rows).map { _ in HistoryRowView() }
         super.init(frame: frame)
         wantsLayer = true
-        layer?.backgroundColor = Theme.sunkenBackground.cgColor
-        let stack = NSStackView(views: labels)
+        layer?.backgroundColor = Theme.sunkenTint.cgColor
+
+        let header = NSView()
+        for label in [headerTitle, headerCount] {
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = Theme.dimText
+            label.translatesAutoresizingMaskIntoConstraints = false
+            header.addSubview(label)
+        }
+        headerCount.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        NSLayoutConstraint.activate([
+            header.heightAnchor.constraint(equalToConstant: Self.headerHeight),
+            headerTitle.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: HistoryRowView.textInset),
+            headerTitle.centerYAnchor.constraint(equalTo: header.centerYAnchor, constant: -1),
+            headerCount.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -10),
+            headerCount.centerYAnchor.constraint(equalTo: header.centerYAnchor, constant: -1),
+        ])
+
+        let stack = NSStackView(views: [header] + rowViews)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.distribution = .fill
         stack.spacing = 0
         stack.detachesHiddenViews = false
-        stack.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         let separator = NSView()
         separator.wantsLayer = true
-        separator.layer?.backgroundColor = Theme.border.cgColor
+        separator.layer?.backgroundColor = Theme.hairline.cgColor
         separator.translatesAutoresizingMaskIntoConstraints = false
         addSubview(separator)
         NSLayoutConstraint.activate([
             separator.leadingAnchor.constraint(equalTo: leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: trailingAnchor),
             separator.topAnchor.constraint(equalTo: topAnchor),
-            separator.heightAnchor.constraint(equalToConstant: 1),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
+            separator.heightAnchor.constraint(equalToConstant: 0.5),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.padding),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.padding),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: Self.padding),
         ])
-        for label in labels { label.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
+        for view in [header] + rowViews { view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
+
+        searchIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+        searchIcon.contentTintColor = Theme.dimText
+        searchIcon.isHidden = true
+        searchIcon.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(searchIcon)
 
         searchField.isBordered = false
         searchField.drawsBackground = false
@@ -125,11 +227,13 @@ final class HistoryListView: NSView, NSTextFieldDelegate {
         searchField.isHidden = true
         searchField.translatesAutoresizingMaskIntoConstraints = false
         addSubview(searchField)
+        let firstRow = rowViews[0]
         NSLayoutConstraint.activate([
-            searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 19),
+            searchIcon.leadingAnchor.constraint(equalTo: firstRow.leadingAnchor, constant: HistoryRowView.textInset + Self.padding - 1),
+            searchIcon.centerYAnchor.constraint(equalTo: firstRow.centerYAnchor),
+            searchField.leadingAnchor.constraint(equalTo: searchIcon.trailingAnchor, constant: 6),
             searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            searchField.topAnchor.constraint(equalTo: labels[0].topAnchor),
-            searchField.heightAnchor.constraint(equalToConstant: Self.rowHeight),
+            searchField.centerYAnchor.constraint(equalTo: firstRow.centerYAnchor),
         ])
     }
 
@@ -141,25 +245,35 @@ final class HistoryListView: NSView, NSTextFieldDelegate {
 
     /// selected が nil のときは先頭から並べる。選択行は窓の中ほどに寄せる。検索中は先頭の行が検索欄になる
     func update(items: [HistoryItem], selected: Int?) {
+        if isSearching {
+            headerCount.stringValue = "\(items.count) 件"
+        } else if let selected {
+            headerCount.stringValue = "\(selected + 1) / \(items.count)"
+        } else {
+            headerCount.stringValue = "\(items.count) 件"
+        }
         let reserved = isSearching ? 1 : 0
         let capacity = Self.rows - reserved
         let keywords = isSearching ? HistorySearch.keywords(searchField.stringValue) : []
         let start = selected.map { min(max(0, $0 - capacity / 2), max(0, items.count - capacity)) } ?? 0
-        for (slot, label) in labels.enumerated() where slot >= reserved {
+        let now = Date()
+        for (slot, row) in rowViews.enumerated() where slot >= reserved {
             let index = start + slot - reserved
             guard index < items.count else {
-                label.attributedStringValue = isSearching && items.isEmpty && slot == reserved ? Self.hint("一致する履歴がありません") : NSAttributedString()
-                label.backgroundColor = .clear
+                let hint = isSearching && items.isEmpty && slot == reserved ? Self.hint("一致する履歴がありません") : NSAttributedString()
+                row.show(title: hint, age: "", isSelected: false)
                 continue
             }
-            let oneLine = items[index].text.replacingOccurrences(of: "\n", with: " ⏎ ")
+            let item = items[index]
+            let oneLine = item.text.replacingOccurrences(of: "\n", with: " ⏎ ")
             let isSelected = index == selected
-            label.attributedStringValue = Self.row(oneLine, color: isSelected ? Theme.text : Theme.dimText, keywords: keywords)
-            label.backgroundColor = isSelected ? Theme.activeLine : .clear
+            row.show(
+                title: Self.row(oneLine, color: isSelected ? Theme.text : Theme.dimText, keywords: keywords),
+                age: AgeLabel.text(forTimestamp: item.timestamp, now: now),
+                isSelected: isSelected)
         }
     }
 
-    /// 文字の左端を入力欄(textContainerInset 12 + lineFragmentPadding 5)に揃える。
     /// keywords にかかった部分は色と太さで目立たせる。最初の一致が行の途中で見切れるなら、その手前から見せる
     private static func row(_ text: String, color: NSColor, keywords: [String] = []) -> NSAttributedString {
         var shown = text
@@ -168,11 +282,8 @@ final class HistoryListView: NSView, NSTextFieldDelegate {
            let from = text.index(firstMatch, offsetBy: -12, limitedBy: text.startIndex) {
             shown = "…" + text[from...]
         }
-        let style = NSMutableParagraphStyle()
-        style.firstLineHeadIndent = 17
-        style.lineBreakMode = .byTruncatingTail
         let result = NSMutableAttributedString(string: shown, attributes: [
-            .font: NSFont.systemFont(ofSize: 13), .foregroundColor: color, .paragraphStyle: style,
+            .font: NSFont.systemFont(ofSize: 13), .foregroundColor: color,
         ])
         let nsShown = shown as NSString
         for keyword in keywords {
@@ -191,11 +302,51 @@ final class HistoryListView: NSView, NSTextFieldDelegate {
     private static func hint(_ text: String) -> NSAttributedString { row(text, color: Theme.dimText) }
 }
 
+/// 下端に常時出す、全操作のキー案内
+final class ShortcutFooterView: NSView {
+    static let height: CGFloat = 30
+    private static let hints = ["⌘↵ 貼り付け", "⌃J/K 履歴", "⌘F 検索", "esc 閉じる"]
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = Theme.sunkenTint.cgColor
+        let labels = Self.hints.map { hint -> NSTextField in
+            let label = NSTextField(labelWithString: hint)
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = Theme.dimText
+            return label
+        }
+        let stack = NSStackView(views: labels)
+        stack.orientation = .horizontal
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        let separator = NSView()
+        separator.wantsLayer = true
+        separator.layer?.backgroundColor = Theme.hairline.cgColor
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(separator)
+        NSLayoutConstraint.activate([
+            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+            separator.topAnchor.constraint(equalTo: topAnchor),
+            separator.heightAnchor.constraint(equalToConstant: 0.5),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: HistoryRowView.textInset + HistoryListView.padding),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+}
+
 /// 貼り付け先アプリを前面のまま、キー入力だけを受ける浮動パネル
 final class InputPanel: NSPanel {
-    static let size = NSSize(width: 640, height: 220 + HistoryListView.height)
+    static let editorHeight: CGFloat = 190
+    static let size = NSSize(width: 640, height: editorHeight + HistoryListView.height + ShortcutFooterView.height)
     let textView = InputTextView()
     let historyList = HistoryListView()
+    private let countLabel = NSTextField(labelWithString: "")
     var onSearchCancel: (() -> Void)?
     var onSearchAccept: (() -> Void)?
 
@@ -212,22 +363,43 @@ final class InputPanel: NSPanel {
         hasShadow = true
         isOpaque = false
         backgroundColor = .clear
-        contentView?.wantsLayer = true
-        contentView?.layer?.backgroundColor = Theme.background.cgColor
-        contentView?.layer?.cornerRadius = 12
-        contentView?.layer?.borderWidth = 1
-        contentView?.layer?.borderColor = Theme.border.cgColor
-        contentView?.layer?.masksToBounds = true
+        // 配色はダーク固定。システムの外観がライトでも、ぼかしと文字色が崩れないようにする
+        appearance = NSAppearance(named: .darkAqua)
+
+        let glass = NSVisualEffectView(frame: NSRect(origin: .zero, size: Self.size))
+        glass.material = .hudWindow
+        glass.blendingMode = .behindWindow
+        glass.state = .active
+        glass.wantsLayer = true
+        glass.layer?.cornerRadius = 16
+        glass.layer?.masksToBounds = true
+        glass.layer?.borderWidth = 0.5
+        glass.layer?.borderColor = Theme.hairline.cgColor
+        contentView = glass
+
+        let tint = NSView(frame: glass.bounds)
+        tint.autoresizingMask = [.width, .height]
+        tint.wantsLayer = true
+        tint.layer?.backgroundColor = Theme.glassTint.cgColor
+        glass.addSubview(tint)
+
+        let footer = ShortcutFooterView(frame: NSRect(x: 0, y: 0, width: Self.size.width, height: ShortcutFooterView.height))
+        footer.autoresizingMask = [.width]
+        glass.addSubview(footer)
 
         let listHeight = HistoryListView.height
-        historyList.frame = NSRect(x: 0, y: 0, width: Self.size.width, height: listHeight)
+        historyList.frame = NSRect(x: 0, y: ShortcutFooterView.height, width: Self.size.width, height: listHeight)
         historyList.autoresizingMask = [.width]
-        contentView?.addSubview(historyList)
+        glass.addSubview(historyList)
 
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: listHeight, width: Self.size.width, height: Self.size.height - listHeight))
+        let editorY = ShortcutFooterView.height + listHeight
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: editorY, width: Self.size.width, height: Self.size.height - editorY))
         scroll.autoresizingMask = [.width, .height]
         scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
         scroll.drawsBackground = false
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 18, right: 0)
         textView.frame = scroll.bounds
         textView.autoresizingMask = [.width]
         textView.isRichText = false
@@ -241,17 +413,31 @@ final class InputPanel: NSPanel {
             .foregroundColor: Theme.selectionForeground,
         ]
         scroll.scrollerKnobStyle = .light
-        textView.textContainerInset = NSSize(width: 12, height: 12)
+        textView.textContainerInset = NSSize(width: 20, height: 18)
         textView.isVerticallyResizable = true
         textView.textContainer?.widthTracksTextView = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
         scroll.documentView = textView
-        contentView?.addSubview(scroll)
+        glass.addSubview(scroll)
+
+        countLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        countLabel.textColor = Theme.dimText.withAlphaComponent(0.8)
+        countLabel.alignment = .right
+        countLabel.frame = NSRect(x: Self.size.width - 116, y: editorY + 4, width: 100, height: 14)
+        countLabel.autoresizingMask = [.minXMargin]
+        glass.addSubview(countLabel)
+        textView.onContentChange = { [weak self] in self?.updateCount() }
+        updateCount()
     }
 
     override var canBecomeKey: Bool { true }
+
+    private func updateCount() {
+        let count = textView.string.count
+        countLabel.stringValue = count == 0 ? "" : "\(count) 文字"
+    }
 
     func beginSearch() {
         historyList.isSearching = true
