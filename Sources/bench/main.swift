@@ -180,6 +180,12 @@ func makeTempDir() -> String {
     return dir
 }
 
+// キーを実機の入力経路で送るテストなので、実行中に手元のキーボードに触れると入力が混ざって失敗する
+if let name = CommandLine.arguments.dropFirst().first, name == "snap" || name.hasPrefix("e2e") {
+    print("\(name): 実行中はキーボードとマウスに触れないでください")
+    _ = shell("/usr/bin/osascript", ["-e", "display notification \"テスト中はキーボードに触れないでください\" with title \"Prompt Line bench\""])
+}
+
 switch CommandLine.arguments.dropFirst().first {
 case "cold":
     // 例: bench cold --app "/Applications/Prompt Line.app" --proc "Prompt Line" --runs 5
