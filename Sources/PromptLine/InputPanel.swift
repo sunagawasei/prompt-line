@@ -6,7 +6,19 @@ extension NSEvent {
     /// ショートカットの判定に使う修飾キー。Caps Lock・テンキー・Fn は無視する
     /// (deviceIndependentFlagsMask のままだと、Caps Lock 中は Esc も Cmd+Enter も一致しない)
     var shortcutFlags: NSEvent.ModifierFlags { modifierFlags.intersection([.command, .shift, .control, .option]) }
+
+    /// Cmd+Z は取り消し、Cmd+Y はやり直し。
+    /// Z が左 Shift のホールドだと Cmd+Shift+Z は同時に押せない。キーボードが送れるときのために Cmd+Shift+Z も受ける
+    fileprivate var textUndo: TextUndo? {
+        switch (Int(keyCode), shortcutFlags) {
+        case (kVK_ANSI_Z, .command): return .undo
+        case (kVK_ANSI_Y, .command), (kVK_ANSI_Z, [.command, .shift]): return .redo
+        default: return nil
+        }
+    }
 }
+
+fileprivate enum TextUndo { case undo, redo }
 
 /// 入力欄。IME の変換中(未確定文字がある間)は、確定・取消のキーを IME に渡す。
 final class InputTextView: NSTextView {
@@ -16,11 +28,34 @@ final class InputTextView: NSTextView {
     var onHistoryOlder: (() -> Void)?
     var onHistoryNewer: (() -> Void)?
     var onSearch: (() -> Void)?
+    /// 履歴を送っている途中の Cmd+Z。送る前の入力へ戻したら true(Electron 版の snapshot)。
+    /// true のときは文字の取り消しをしない
+    var onUndo: (() -> Bool)?
     /// 文字数の表示とプレースホルダの更新用。string への代入でも呼ぶ(代入では NSText.didChangeNotification は出ない)
     var onContentChange: (() -> Void)?
 
+    /// 入力の塊と削除の塊を分けて覚えておく。標準の取り消しは両方を1つにまとめるので、
+    /// 消した文字だけを戻せない
+    private struct EditCheckpoint {
+        var text: String
+        var selection: NSRange
+    }
+    private enum Burst { case typing, deleting }
+    private var undoStack: [EditCheckpoint] = []
+    private var redoStack: [EditCheckpoint] = []
+    private var burst: Burst?
+    private var applyingCheckpoint = false
+    private var trackingEdit = false
+
     override var string: String {
-        didSet { contentChanged() }
+        didSet {
+            if !applyingCheckpoint, !trackingEdit {
+                undoStack.removeAll()
+                redoStack.removeAll()
+                burst = nil
+            }
+            contentChanged()
+        }
     }
 
     override func didChangeText() {
@@ -44,6 +79,103 @@ final class InputTextView: NSTextView {
         ]).draw(at: NSPoint(x: origin.x + padding, y: origin.y))
     }
 
+    private func currentCheckpoint() -> EditCheckpoint {
+        EditCheckpoint(text: string, selection: selectedRange())
+    }
+
+    /// 入力から削除へ(またはその逆)移ったときに、移る前の文章を1回だけ積む。
+    /// 変換中の Cmd+Z 自体は IME に渡すが、削除の直前の文章は覚えておく
+    private func remember(_ kind: Burst, force: Bool = false) {
+        guard !applyingCheckpoint else { return }
+        if !force, burst == kind { return }
+        undoStack.append(currentCheckpoint())
+        redoStack.removeAll()
+        burst = kind
+    }
+
+    private func apply(_ checkpoint: EditCheckpoint) {
+        applyingCheckpoint = true
+        burst = nil
+        string = checkpoint.text
+        let length = (checkpoint.text as NSString).length
+        let location = min(checkpoint.selection.location, length)
+        let span = min(checkpoint.selection.length, length - location)
+        setSelectedRange(NSRange(location: location, length: span))
+        applyingCheckpoint = false
+        contentChanged()
+    }
+
+    func undoUserEdit() {
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(currentCheckpoint())
+        apply(previous)
+    }
+
+    func redoUserEdit() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(currentCheckpoint())
+        apply(next)
+    }
+
+    private func track(_ body: () -> Void) {
+        trackingEdit = true
+        body()
+        trackingEdit = false
+    }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        let range = replacementRange.location == NSNotFound ? selectedRange() : replacementRange
+        remember(.typing, force: range.length > 0)
+        track { super.insertText(insertString, replacementRange: replacementRange) }
+    }
+
+    /// IME は変換中の削除を setMarkedText で行う。短くなったら削除として、その前の文章を積む
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        let before = currentCheckpoint()
+        track { super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange) }
+        guard !applyingCheckpoint, before.text != self.string else { return }
+        let kind: Burst = self.string.count < before.text.count ? .deleting : .typing
+        guard burst != kind else { return }
+        undoStack.append(before)
+        redoStack.removeAll()
+        burst = kind
+    }
+
+    override func deleteBackward(_ sender: Any?) {
+        remember(.deleting)
+        track { super.deleteBackward(sender) }
+    }
+
+    override func deleteForward(_ sender: Any?) {
+        remember(.deleting)
+        track { super.deleteForward(sender) }
+    }
+
+    override func deleteWordBackward(_ sender: Any?) {
+        remember(.deleting)
+        track { super.deleteWordBackward(sender) }
+    }
+
+    override func deleteWordForward(_ sender: Any?) {
+        remember(.deleting)
+        track { super.deleteWordForward(sender) }
+    }
+
+    override func deleteToBeginningOfLine(_ sender: Any?) {
+        remember(.deleting)
+        track { super.deleteToBeginningOfLine(sender) }
+    }
+
+    override func deleteToEndOfLine(_ sender: Any?) {
+        remember(.deleting)
+        track { super.deleteToEndOfLine(sender) }
+    }
+
+    override func cut(_ sender: Any?) {
+        remember(.deleting)
+        track { super.cut(sender) }
+    }
+
     override func keyDown(with event: NSEvent) {
         if hasMarkedText() { return super.keyDown(with: event) }
         let flags = event.shortcutFlags
@@ -63,6 +195,16 @@ final class InputTextView: NSTextView {
 
     /// アプリを前面にしないパネルでは、メインメニュー経由の編集ショートカットが届かないので自前で受ける
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if let edit = event.textUndo {
+            // 変換中は IME に渡す。fork 元の handleUndoShortcut と同じ
+            if hasMarkedText() { return false }
+            if edit == .undo, onUndo?() == true { return true }
+            switch edit {
+            case .undo: undoUserEdit()
+            case .redo: redoUserEdit()
+            }
+            return true
+        }
         guard !hasMarkedText() else { return super.performKeyEquivalent(with: event) }
         let flags = event.shortcutFlags
         if flags == .command {
@@ -72,13 +214,9 @@ final class InputTextView: NSTextView {
             case kVK_ANSI_C: copy(nil); return true
             case kVK_ANSI_X: cut(nil); return true
             case kVK_ANSI_A: selectAll(nil); return true
-            case kVK_ANSI_Z: undoManager?.undo(); return true
             case kVK_ANSI_F: onSearch?(); return true
             default: break
             }
-        } else if flags == [.command, .shift], Int(event.keyCode) == kVK_ANSI_Z {
-            undoManager?.redo()
-            return true
         }
         return super.performKeyEquivalent(with: event)
     }
@@ -403,7 +541,7 @@ final class InputPanel: NSPanel {
         textView.frame = scroll.bounds
         textView.autoresizingMask = [.width]
         textView.isRichText = false
-        textView.allowsUndo = true
+        textView.allowsUndo = false
         textView.font = .systemFont(ofSize: 15)
         textView.drawsBackground = false
         textView.textColor = Theme.text

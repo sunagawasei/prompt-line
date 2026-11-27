@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.textView.onHistoryOlder = { [weak self] in self?.navigateHistory(older: true) }
         panel.textView.onHistoryNewer = { [weak self] in self?.navigateHistory(older: false) }
         panel.textView.onSearch = { [weak self] in self?.beginSearch() }
+        panel.textView.onUndo = { [weak self] in self?.undoHistory() ?? false }
         panel.historyList.onQueryChange = { [weak self] in self?.search($0) }
         panel.onSearchCancel = { [weak self] in self?.endSearch(keepingText: false) }
         panel.onSearchAccept = { [weak self] in self?.endSearch(keepingText: true) }
@@ -118,6 +119,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : navigator.newer(in: items)
         if let text { show(text) }
         refreshHistoryList()
+    }
+
+    /// 履歴を送っている途中の Cmd+Z は、送る前の入力へ戻す(Electron 版の snapshot)
+    private func undoHistory() -> Bool {
+        guard navigator.isNavigating else { return false }
+        let text = navigator.stash
+        navigator.reset()
+        show(text)
+        refreshHistoryList()
+        return true
     }
 
     private func refreshHistoryList() {
