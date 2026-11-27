@@ -68,7 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 fputs("ホットキーを登録できません(他のアプリが同じ組み合わせを使用中): \(spec)\n", stderr)
                 exit(1)
             }
-            hotkey.onPress = { [weak self] in self?.toggle() }
+            hotkey.onPress = { [weak self] in self?.showOrFocusPanel() }
             hotkeys.append(hotkey)
         }
     }
@@ -84,21 +84,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let saved = draft.load() { panel.textView.string = saved.text }
     }
 
-    private func toggle() {
-        debugLog("toggle visible=\(panel.isVisible) front=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "nil")")
-        if panel.isVisible {
-            hidePanel()
-            return
-        }
-        // 自分自身が前面のことは無いが、念のため貼り付け先にしない
+    private func showOrFocusPanel() {
         let front = NSWorkspace.shared.frontmostApplication
-        target = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? target : front
-        refreshHistoryList()
-        panel.centerOnActiveScreen()
+        debugLog("showOrFocusPanel visible=\(panel.isVisible) front=\(front?.localizedName ?? "nil")")
+        if !panel.isVisible {
+            if front?.processIdentifier != ProcessInfo.processInfo.processIdentifier { target = front }
+            refreshHistoryList()
+            panel.centerOnActiveScreen()
+            panel.makeFirstResponder(panel.textView)
+        }
         panel.makeKeyAndOrderFront(nil)
         // 前面アプリが貼り付け先のままだと、Raycast のクリップボード履歴などが入力欄でなくそのアプリへ貼る
         NSApp.activate(ignoringOtherApps: true)
-        panel.makeFirstResponder(panel.textView)
     }
 
     /// 閉じても下書きは残す(貼り付けたときだけ消える)。履歴を送っている途中なら、送る前の入力へ戻す

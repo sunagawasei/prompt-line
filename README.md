@@ -10,7 +10,7 @@
 
 | キー | 動作 |
 |---|---|
-| Cmd+Shift+Space / Cmd+Shift+P | パネルを開く・閉じる |
+| Cmd+Shift+Space / Cmd+Shift+P | パネルを開く。表示中はパネルにフォーカスを戻す |
 | Cmd+Enter | 貼り付け先のアプリへ貼り付けて閉じる |
 | Esc | 閉じる(下書きは残る) |
 | Ctrl+j / Ctrl+k | 履歴を古い方・新しい方へ送る |

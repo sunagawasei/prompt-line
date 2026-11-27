@@ -248,7 +248,11 @@ case "e2e":
     window.makeKeyAndOrderFront(nil)
     app.activate(ignoringOtherApps: true)
     DispatchQueue.global().async {
-        func fail(_ msg: String) -> Never { print("FAIL: \(msg)"); exit(1) }
+        func fail(_ msg: String) -> Never {
+            if !appPath.isEmpty { stopInstance(dataDir: dataDir) }
+            print("FAIL: \(msg)")
+            exit(1)
+        }
         sleep(1)
         DispatchQueue.main.sync { window.makeFirstResponder(target) }
         let hotkeyCode = UInt16(arg("--key", default: "49")).map { CGKeyCode($0) } ?? 49
@@ -256,24 +260,45 @@ case "e2e":
         guard waitUntil(timeout: 3, { panelVisible(owner: owner) }) != nil else { fail("パネルが表示されない") }
         usleep(200_000)
         type(text)
+        var expected = text
+        if !appPath.isEmpty {
+            guard let pid = instancePID(dataDir: dataDir) else { fail("テスト用のパネルが起動していない") }
+            guard waitUntil(timeout: 3, { readPanelText(dataDir: dataDir) == text }) != nil else {
+                fail("最初の入力がパネルに届かない")
+            }
+            DispatchQueue.main.sync { app.activate(ignoringOtherApps: true) }
+            guard waitUntil(timeout: 3, { NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid() }) != nil,
+                  panelVisible(owner: owner) else { fail("パネルを表示したまま貼り付け先へ移れない") }
+
+            post(key: testHotkeyKey, flags: testHotkeyFlags)
+            guard waitUntil(timeout: 3, { NSWorkspace.shared.frontmostApplication?.processIdentifier == pid }) != nil,
+                  panelVisible(owner: owner) else { fail("ホットキーで表示中のパネルに戻れない") }
+            let suffix = " 続き"
+            expected += suffix
+            type(suffix)
+            guard waitUntil(timeout: 3, { readPanelText(dataDir: dataDir) == expected }) != nil else {
+                fail("フォーカスを戻したあと、入力を続けられない")
+            }
+            print("PASS: パネルから別アプリへ移ったあと、ホットキーで入力を再開できた")
+        }
         usleep(200_000)
         post(key: 36, flags: [.maskCommand, .maskAlphaShift]) // Cmd+Return(Caps Lock 中でも届く)
         guard waitUntil(timeout: 3, { !panelVisible(owner: owner) }) != nil else { fail("パネルが閉じない") }
         usleep(500_000)
         let got = DispatchQueue.main.sync { target.string }
-        guard got == text else { fail("貼り付け結果が違う: \(got.debugDescription) != \(text.debugDescription)") }
+        guard got == expected else { fail("貼り付け結果が違う: \(got.debugDescription) != \(expected.debugDescription)") }
         let frontIsTarget = DispatchQueue.main.sync { NSApp.isActive }
         guard frontIsTarget else { fail("貼り付け後に貼り付け先が前面でない") }
         if !appPath.isEmpty {
             let history = (try? String(contentsOfFile: dataDir + "/history.jsonl", encoding: .utf8)) ?? ""
-            guard history.hasPrefix("{\"text\":\"\(text)\",\"timestamp\":"), history.hasSuffix("\n"), history.split(separator: "\n").count == 1 else {
+            guard history.hasPrefix("{\"text\":\"\(expected)\",\"timestamp\":"), history.hasSuffix("\n"), history.split(separator: "\n").count == 1 else {
                 fail("履歴の追記が想定と違う: \(history.debugDescription)")
             }
             guard !FileManager.default.fileExists(atPath: dataDir + "/draft-swift.json") else { fail("貼り付け後に下書きが残っている") }
             stopInstance(dataDir: dataDir)
             print("PASS: 履歴に1行追記され、下書きは消えた")
         }
-        print("PASS: \(text.debugDescription) が貼り付け先へ届き、パネルは閉じた")
+        print("PASS: \(expected.debugDescription) が貼り付け先へ届き、パネルは閉じた")
         exit(0)
     }
     app.run()
